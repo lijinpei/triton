@@ -263,6 +263,7 @@ private:
   // shared memory rd/st for blocked or mma layout with data padding
   void processReplica(Location loc, ConversionPatternRewriter &rewriter,
                       bool stNotRd, RankedTensorType type,
+                      unsigned accumSizePerThread,
                       ArrayRef<unsigned> numCTAsEachRep,
                       ArrayRef<unsigned> multiDimRepId, unsigned vec,
                       ArrayRef<unsigned> paddedRepShape,
@@ -272,8 +273,6 @@ private:
     auto accumNumCTAsEachRep = product<unsigned>(numCTAsEachRep);
     auto layout = type.getEncoding();
     auto rank = type.getRank();
-    auto sizePerThread = getSizePerThread(layout);
-    auto accumSizePerThread = product<unsigned>(sizePerThread);
     SmallVector<unsigned> numCTATiles(rank);
     auto shapePerCTATile = getShapePerCTATile(layout);
     auto shapePerCTA = getShapePerCTA(layout, type.getShape());
@@ -610,6 +609,12 @@ private:
     auto outOrd = getOrder(dstLayout);
     SmallVector<Value> outVals(outElems);
 
+    auto srcSizePerThread = getSizePerThread(srcLayout);
+    auto srcAccumSizePerThread = product<unsigned>(srcSizePerThread);
+    auto dstSizePerThread = getSizePerThread(dstLayout);
+    auto dstAccumSizePerThread = product<unsigned>(dstSizePerThread);
+    auto accumSizePerThread =
+        std::min(srcAccumSizePerThread, dstAccumSizePerThread);
     for (unsigned repId = 0; repId < accumNumReplicates; ++repId) {
       auto multiDimRepId =
           getMultiDimIndex<unsigned>(repId, numReplicates, outOrd);
@@ -630,8 +635,9 @@ private:
                                                loc, rewriter);
         } else
           processReplica(loc, rewriter, /*stNotRd*/ true, srcTy,
-                         inNumCTAsEachRep, multiDimRepId, inVec, paddedRepShape,
-                         origRepShape, outOrd, vals, smemBase);
+                         accumSizePerThread, inNumCTAsEachRep, multiDimRepId,
+                         inVec, paddedRepShape, origRepShape, outOrd, vals,
+                         smemBase);
       } else {
         llvm::report_fatal_error(
             "ConvertLayout with input layout not implemented");
@@ -648,8 +654,8 @@ private:
                                  outVals, smemBase, shape, /*isDestMma=*/true);
         else
           processReplica(loc, rewriter, /*stNotRd*/ false, dstTy,
-                         outNumCTAsEachRep, multiDimRepId, outVec,
-                         paddedRepShape, origRepShape, outOrd, outVals,
+                         accumSizePerThread, outNumCTAsEachRep, multiDimRepId,
+                         outVec, paddedRepShape, origRepShape, outOrd, outVals,
                          smemBase);
       } else {
         llvm::report_fatal_error(
