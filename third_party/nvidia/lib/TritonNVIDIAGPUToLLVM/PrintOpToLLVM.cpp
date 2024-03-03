@@ -162,8 +162,8 @@ struct PrintOpConversion : public ConvertOpToLLVMPattern<triton::PrintOp> {
     }
   }
 
-  std::string getFormatSubstr(Value value, bool hex = false,
-                              std::optional<int> width = std::nullopt) const {
+  static std::string getFormatSubstr(Value value, bool hex = false,
+                              std::optional<int> width = std::nullopt) {
     Type type = value.getType();
     if (type.isa<LLVM::PointerType>()) {
       return "%p";
@@ -319,6 +319,15 @@ struct PrintOpConversion : public ConvertOpToLLVMPattern<triton::PrintOp> {
 
 } // namespace
 
+  void llPrintfDebug(StringRef msg, ValueRange args,
+                        ConversionPatternRewriter &rewriter) {
+    std::string str = msg.str();
+    for (auto v: args) {
+      str += ' ';
+      str += PrintOpConversion::getFormatSubstr(v);
+    }
+    PrintOpConversion::llPrintf(str, args, rewriter);
+  }
 void mlir::triton::NVIDIA::populatePrintOpToLLVMPattern(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
     PatternBenefit benefit) {

@@ -13,6 +13,9 @@ using ::mlir::LLVM::shflUpSync;
 using ::mlir::LLVM::NVIDIA::storeShared;
 using ::mlir::triton::gpu::getTotalElemsPerThread;
 
+void llPrintfDebug(StringRef msg, ValueRange args,
+                        ConversionPatternRewriter &rewriter);
+
 // apply combine region to acc and cur and accumulate it into acc
 // TODO(Lezcano) This is now duplicated with ReduceOpConversion::reduce.
 // Deduplicate
@@ -57,6 +60,9 @@ scanThreadContiguousElements(SmallVector<SmallVector<Value>> &srcValues,
   unsigned numChunks = srcValues.size() / scanElementsPerThreads;
   unsigned stride = helper.getAxisElementStride();
   SmallVector<SmallVector<Value>> accs(numChunks);
+  llvm::errs() << "scanElementsPerThreads: " << scanElementsPerThreads << '\n';
+  llvm::errs() << "numChunks: " << numChunks << '\n';
+  llvm::errs() << "stride: " << stride << '\n';
   for (unsigned srcIndex = 0; srcIndex < srcValues.size(); srcIndex++) {
     // Change this into emitOffsetForLayout?
     unsigned accIndex = (srcIndex % stride) +
@@ -78,6 +84,7 @@ static void warpScan(SmallVector<SmallVector<Value>> &srcValues,
   unsigned elementStride = helper.getAxisElementStride();
   unsigned threadStride = helper.getAxisThreadStride();
   unsigned scanDim = helper.getAxisNumThreadsPerWarpWithUniqueData();
+  llvm::errs() << "scanDim: " << scanDim << '\n';
   for (unsigned srcIndex = 0; srcIndex < srcValues.size(); srcIndex++) {
     unsigned elementIdx = (srcIndex / elementStride) % scanElementsPerThreads;
     // Only consider the last element of each contiguous chunk of elements.
@@ -483,6 +490,17 @@ ScanOpConversion::emitFastScan(triton::ScanOp op, triton::ScanOpAdaptor adaptor,
   auto srcValues =
       unpackInputs(loc, op, adaptor, rewriter, *getTypeConverter());
 
+    {
+      Value threadId = getThreadId(rewriter, loc);
+      SmallVector<Value> args;
+      args.push_back(threadId);
+      for (auto v: srcValues) {
+        for (auto v1: v)
+        args.push_back(v1);
+      }
+      llPrintfDebug("scan input", args, rewriter);
+    }
+
   // For the reverse option we apply flip(scan(flip()) in
   // order to avoid having a separate code path in the reverse direction.
   // We do this by 1) reversing chunks, 2) reversing lanes, 3) reversing
@@ -500,6 +518,17 @@ ScanOpConversion::emitFastScan(triton::ScanOp op, triton::ScanOpAdaptor adaptor,
   // Apply warp level scan to the last element of each chunk of contiguous
   // elements.
   warpScan(srcValues, rewriter, helper, laneIdAxis);
+  llvm::errs() << "axisNumWarps: " << axisNumWarps << '\n';
+    {
+      Value threadId = getThreadId(rewriter, loc);
+      SmallVector<Value> args;
+      args.push_back(threadId);
+      for (auto v: srcValues) {
+        for (auto v1: v)
+        args.push_back(v1);
+      }
+      llPrintfDebug("after warp scan", args, rewriter);
+    }
 
   if (axisNumWarps > 1) {
     // Slow path for the case where there are multiple warps with unique data on
@@ -521,6 +550,7 @@ ScanOpConversion::emitFastScan(triton::ScanOp op, triton::ScanOpAdaptor adaptor,
     AddPartialReduce(srcValues, rewriter, helper, smemBases, smemTypes,
                      warpIdAxis, laneIdAxis, flatIdParallel);
   } else if (srcValues.size() > 1) {
+    llvm::errs() << "srcValues.size(): " << srcValues.size() << '\n';
     // Fast path for the case where there is only one warp with unique data on
     // the axis.
     unsigned scanDim = helper.getAxisNumThreadsPerWarpWithUniqueData();
@@ -553,6 +583,15 @@ ScanOpConversion::emitFastScan(triton::ScanOp op, triton::ScanOpAdaptor adaptor,
   auto valuesTransposed = transpose(srcValues);
   for (unsigned i = 0; i < op.getNumOperands(); ++i) {
     auto resultTy = op.getResult()[i].getType().dyn_cast<RankedTensorType>();
+    {
+      Value threadId = getThreadId(rewriter, loc);
+      SmallVector<Value> args;
+      args.push_back(threadId);
+      for (auto v: valuesTransposed[i]) {
+        args.push_back(v);
+      }
+      llPrintfDebug("scan results", args, rewriter);
+    }
     results[i] = packLLElements(loc, getTypeConverter(), valuesTransposed[i],
                                 rewriter, resultTy);
   }
