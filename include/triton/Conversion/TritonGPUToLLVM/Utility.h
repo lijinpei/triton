@@ -1234,9 +1234,9 @@ DenseMap<unsigned, Value> static getSwizzledSharedPtrs(
 }
 
 static SmallVector<Value>
-loadSharedToDistributed(Value dst, ArrayRef<SmallVector<Value>> dstIndices,
-                        Value src, SharedMemoryObject smemObj, Type elemTy,
-                        Location loc, ConversionPatternRewriter &rewriter) {
+loadSharedToDistributed(Value dst, Value src, SharedMemoryObject smemObj,
+                        Type elemTy, Location loc,
+                        ConversionPatternRewriter &rewriter) {
   auto dstTy = dst.getType().cast<RankedTensorType>();
   auto dstShape = dstTy.getShape();
   assert(dstShape.size() <= 2 && "Unexpected rank of loadSharedToDistributed");
@@ -1266,7 +1266,6 @@ loadSharedToDistributed(Value dst, ArrayRef<SmallVector<Value>> dstIndices,
   unsigned minVec = std::min(outVec, inVec);
   unsigned outElems = triton::gpu::getTotalElemsPerThread(dstTy);
   SmallVector<Value> offsetVals = {smemObj.strides.size(), i32_val(0)};
-  assert(outElems == dstIndices.size());
 
   DenseMap<unsigned, Value> sharedPtrs =
       getSwizzledSharedPtrs(loc, outVec, dstTy, srcSharedLayout, elemTy,
@@ -1289,10 +1288,8 @@ loadSharedToDistributed(Value dst, ArrayRef<SmallVector<Value>> dstIndices,
 }
 
 static void storeDistributedToShared(Value src, ArrayRef<Value> inVals,
-                                     ArrayRef<Value> dstStrides,
-                                     ArrayRef<SmallVector<Value>> srcIndices,
-                                     Value dst, Value smemBase, Type elemTy,
-                                     Location loc,
+                                     ArrayRef<Value> dstStrides, Value dst,
+                                     Value smemBase, Type elemTy, Location loc,
                                      ConversionPatternRewriter &rewriter) {
   auto srcTy = src.getType().cast<RankedTensorType>();
   auto srcShape = srcTy.getShape();
@@ -1322,7 +1319,6 @@ static void storeDistributedToShared(Value src, ArrayRef<Value> inVals,
                         : dstSharedLayout.getVec();
   unsigned minVec = std::min(outVec, inVec);
   unsigned numElems = triton::gpu::getTotalElemsPerThread(srcTy);
-  assert(numElems == srcIndices.size());
   auto wordTy = vec_ty(elemTy, minVec);
   Value word;
 
