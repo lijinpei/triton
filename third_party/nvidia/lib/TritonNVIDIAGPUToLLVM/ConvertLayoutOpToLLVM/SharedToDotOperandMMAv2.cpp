@@ -59,7 +59,6 @@ private:
   int kOrder;
   int nonKOrder;
   int kWidth;
-  int vecWidth;
   SmallVector<int64_t> tileShape;
   SmallVector<int> instrShape;
   SmallVector<int> matShape;
@@ -200,7 +199,6 @@ MMA16816SmemLoader::computeLdmatrixMatOffs(Value lane, Value cSwizzleOffset) {
 //
 //               quad width
 // <----------------------------------------->
-// vecWidth
 // <------->
 //  *#t0 ... *#t0  t1 ... t1  t2 ... t2  t3 ... t3   ||  *t0 ... *t0  t1 ... t1  t2 ... t2  t3 ... t3  /|\
 //  t4 ... t4  t5 ... t5  t6 ... t6  t7 ... t7   ||  t4 ... t4  t5 ... t5  t6 ... t6  t7 ... t7   |
@@ -275,14 +273,8 @@ SmallVector<Value> MMA16816SmemLoader::computeLdsMatOffs(Value lane,
         Value j = add(jBase, mul(jOff, i32_val(quadWidth)));
         // Compute id of this ptr
         int idx = rep * 2 * kWidth;
-        if (needTrans) {
-          idx += quadId * vecWidth;
-          idx += elemId % vecWidth;
-          idx += elemId / vecWidth * kWidth;
-        } else {
-          idx += quadId * kWidth;
-          idx += elemId;
-        }
+        idx += quadId * kWidth;
+        idx += elemId;
 
         if (needTrans) {
           offs[idx] = add(i, mul(j, stridedSmemOffset));
@@ -310,7 +302,7 @@ MMA16816SmemLoader::loadX4(int batch, int mat0, int mat1, ArrayRef<Value> ptrs,
   if (canUseLdmatrix)
     ptrIdx = matIdx[order[0]] / (instrShape[order[0]] / matShape[order[0]]);
   else
-    ptrIdx = matIdx[order[0]] * (needTrans ? kWidth : vecWidth);
+    ptrIdx = matIdx[order[0]] * kWidth;
 
   // The main difference with the original triton code is we removed the
   // prefetch-related logic here for the upstream optimizer phase should
@@ -322,19 +314,20 @@ MMA16816SmemLoader::loadX4(int batch, int mat0, int mat1, ArrayRef<Value> ptrs,
   auto resTy = matTy.cast<LLVM::LLVMStructType>();
   Type elemTy = matTy.cast<LLVM::LLVMStructType>().getBody()[0];
 
-  // For some reasons, LLVM's NVPTX backend inserts unnecessary (?) integer
-  // instructions to pack & unpack sub-word integers. A workaround is to
-  // store the results of ldmatrix in i32
-  if (auto vecElemTy = elemTy.dyn_cast<VectorType>()) {
-    Type elemElemTy = vecElemTy.getElementType();
-    if (auto intTy = elemElemTy.dyn_cast<IntegerType>()) {
-      if (intTy.getWidth() <= 16) {
-        elemTy = rewriter.getI32Type();
-        resTy =
-            LLVM::LLVMStructType::getLiteral(ctx, SmallVector<Type>(4, elemTy));
-      }
-    }
-  }
+  //// For some reasons, LLVM's NVPTX backend inserts unnecessary (?) integer
+  //// instructions to pack & unpack sub-word integers. A workaround is to
+  //// store the results of ldmatrix in i32
+  // if (auto vecElemTy = elemTy.dyn_cast<VectorType>()) {
+  //   Type elemElemTy = vecElemTy.getElementType();
+  //   if (auto intTy = elemElemTy.dyn_cast<IntegerType>()) {
+  //     if (intTy.getWidth() <= 16) {
+  //       elemTy = rewriter.getI32Type();
+  //       resTy =
+  //           LLVM::LLVMStructType::getLiteral(ctx, SmallVector<Type>(4,
+  //           elemTy));
+  //     }
+  //   }
+  // }
 
   if (canUseLdmatrix) {
     Value stridedOffset =
@@ -359,22 +352,25 @@ MMA16816SmemLoader::loadX4(int batch, int mat0, int mat1, ArrayRef<Value> ptrs,
 
     // The result type is 4xi32, each i32 is composed of 2xf16
     // elements (adjacent two columns in a row) or a single f32 element.
+    auto resTy =
+        LLVM::LLVMStructType::getLiteral(ctx, SmallVector<Type>(4, i32_ty));
     Value resV4 = builder.launch(rewriter, loc, resTy);
-    return {extract_val(elemTy, resV4, 0), extract_val(elemTy, resV4, 1),
-            extract_val(elemTy, resV4, 2), extract_val(elemTy, resV4, 3)};
+    auto getRes = [&](int idx) {
+      return bitcast(extract_val(i32_ty, resV4, 0), elemTy);
+    };
+    return {getRes(0), getRes(1), getRes(2), getRes(3)};
   } else {
     // base pointers
     std::array<std::array<Value, 4>, 2> ptrs;
-    for (int i = 0; i < vecWidth; i++)
+    for (int i = 0; i < kWidth; i++)
       ptrs[0][i] = getPtr(ptrIdx + i);
-    for (int i = 0; i < vecWidth; i++)
-      ptrs[1][i] = getPtr(ptrIdx + i + vecWidth);
+    for (int i = 0; i < kWidth; i++)
+      ptrs[1][i] = getPtr(ptrIdx + i + kWidth);
     // static offsets along outer dimension
     int _i0 = matIdx[order[1]] * (stridedLoadMatOffset * stridedMatShape);
     int _i1 = _i0;
     if (needTrans)
-      _i1 += (kWidth != vecWidth) ? vecWidth
-                                  : stridedLoadMatOffset * stridedMatShape;
+      _i1 += stridedLoadMatOffset * stridedMatShape;
     else
       _i1 += (kOrder == 2 ? 1 : stridedLoadMatOffset) * stridedMatShape;
     Value i0 = mul(i32_val(_i0), stridedSmemOffset);
@@ -386,10 +382,10 @@ MMA16816SmemLoader::loadX4(int batch, int mat0, int mat1, ArrayRef<Value> ptrs,
     std::array<Value, 2> ii = {i0, i1};
     // load 4 32-bit values from shared memory
     // (equivalent to ldmatrix.x4)
-    SmallVector<SmallVector<Value>> vptrs(4, SmallVector<Value>(vecWidth));
+    SmallVector<SmallVector<Value>> vptrs(4, SmallVector<Value>(kWidth));
 
     for (int i = 0; i < 4; ++i)
-      for (int j = 0; j < vecWidth; ++j) {
+      for (int j = 0; j < kWidth; ++j) {
         vptrs[i][j] = gep(ptr_ty(ctx, 3), shemTy, ptrs[i / 2][j], ii[i % 2]);
       }
     // row + trans and col + no-trans are equivalent
@@ -397,32 +393,18 @@ MMA16816SmemLoader::loadX4(int batch, int mat0, int mat1, ArrayRef<Value> ptrs,
         (needTrans && kOrder == 2) || (!needTrans && kOrder == 1);
     // pack loaded vectors into 4 32-bit values
     int inc = needTrans ? 1 : kWidth;
-    VectorType packedTy = vec_ty(int_ty(8 * elemBytes), inc);
-    int canonBits = std::min(32, 8 * elemBytes * inc);
-    int canonWidth = (8 * elemBytes * inc) / canonBits;
-    Type canonInt = int_ty(canonBits);
     std::array<Value, 4> retElems;
-    retElems.fill(undef(vec_ty(canonInt, 32 / canonBits)));
-    for (int r = 0; r < 2; ++r) {
-      for (int em = 0; em < 2 * vecWidth; em += inc) {
-        int e = em % vecWidth;
-        int m = em / vecWidth;
-        int idx = m * 2 + r;
-        Value ptr = bitcast(vptrs[idx][e], ptr_ty(ctx, 3));
-        Value val = load(packedTy, ptr);
-        Value canonval = bitcast(val, vec_ty(canonInt, canonWidth));
-        for (int w = 0; w < canonWidth; ++w) {
-          int ridx = idx + w * kWidth / vecWidth;
-          retElems[ridx] =
-              insert_element(retElems[ridx],
-                             extract_element(canonval, i32_val(w)), i32_val(e));
-        }
+    retElems.fill(undef(elemTy));
+    for (int r = 0; r < 4; ++r) {
+      for (int em = 0; em < kWidth; em += inc) {
+        Value ptr = bitcast(vptrs[r][em], ptr_ty(ctx, 3));
+        Value val = load(elemTy, ptr);
+        retElems[r] = val;
       }
     }
     if (isActualTrans)
       std::swap(retElems[1], retElems[2]);
-    return {bitcast(retElems[0], i32_ty), bitcast(retElems[1], i32_ty),
-            bitcast(retElems[2], i32_ty), bitcast(retElems[3], i32_ty)};
+    return {retElems[0], retElems[1], retElems[2], retElems[3]};
   }
 }
 
@@ -446,12 +428,10 @@ MMA16816SmemLoader::MMA16816SmemLoader(
   stridedMatShape = matShape[order[1]];
   stridedSmemOffset = smemStrides[order[1]];
   smemBatchOffset = smemStrides[order[2]];
-  vecWidth = 4 / elemBytes;
   // rule: k must be the fast-changing axis.
   needTrans = kOrder != order[0];
   nonKOrder = (kOrder == 2) ? 1 : 2;
-  canUseLdmatrix = elemBytes == 2 || (!needTrans);
-  canUseLdmatrix = canUseLdmatrix && (kWidth == vecWidth);
+  canUseLdmatrix = (kWidth * elemBytes == 4);
 
   if (canUseLdmatrix) {
     // Each CTA, the warps is arranged as [1xwarpsPerTile] if not transposed,
@@ -522,14 +502,13 @@ Value composeValuesToDotOperandLayoutStruct(
   return result;
 }
 
-std::function<void(int, int, int)>
-getLoadMatrixFn(MemDescType descTy, const SharedMemoryObject &smemObj,
-                NvidiaMmaEncodingAttr mmaLayout, int warpsPerTile,
-                uint32_t kOrder, int kWidth, SmallVector<int> instrShape,
-                SmallVector<int> matShape, SmallVector<Value> multiDimWarpId,
-                Value lane, ValueTable &vals, bool isA,
-                const LLVMTypeConverter *typeConverter,
-                ConversionPatternRewriter &rewriter, Location loc) {
+std::function<void(int, int, int)> getLoadMatrixFn(
+    DotOperandEncodingAttr encoding, MemDescType descTy,
+    const SharedMemoryObject &smemObj, NvidiaMmaEncodingAttr mmaLayout,
+    int warpsPerTile, uint32_t kOrder, int kWidth, SmallVector<int> instrShape,
+    SmallVector<int> matShape, SmallVector<Value> multiDimWarpId, Value lane,
+    ValueTable &vals, bool isA, const LLVMTypeConverter *typeConverter,
+    ConversionPatternRewriter &rewriter, Location loc) {
   auto shapePerCTA = getShapePerCTA(descTy);
   Type eltTy = descTy.getElementType();
   // We assumes that the input operand of Dot should be from shared layout.
@@ -563,8 +542,9 @@ getLoadMatrixFn(MemDescType descTy, const SharedMemoryObject &smemObj,
       ptrs[i] =
           gep(ptr_ty(rewriter.getContext(), 3), smemTy, smemBase, offs[i]);
     // actually load from shared memory
-    auto matTy = LLVM::LLVMStructType::getLiteral(eltTy.getContext(),
-                                                  SmallVector<Type>(4, i32_ty));
+    auto destTy = RankedTensorType::get(descTy.getShape(),
+                                        descTy.getElementType(), encoding);
+    auto matTy = typeConverter->convertType(destTy);
     auto [ha0, ha1, ha2, ha3] = loader.loadX4(
         batch, (kOrder == 2) ? a : b /*mat0*/, (kOrder == 2) ? b : a /*mat1*/,
         ptrs, matTy, getSharedMemTy(eltTy));
@@ -598,8 +578,9 @@ Value loadArg(ConversionPatternRewriter &rewriter, Location loc,
   int mmaInstrM = 16, mmaInstrN = 8, mmaInstrK = 4 * 64 / bitwidth;
   int matShapeM = 8, matShapeN = 8, matShapeK = 2 * 64 / bitwidth;
 
-  auto numRep =
-      mmaLayout.getMMAv2Rep(shapePerCTA, bitwidth, encoding.getOpIdx());
+  auto numRep = mmaLayout.getMMAv2Rep(
+      shapePerCTA, NvidiaMmaEncodingAttr::getMMAv2NaturalKWidth(bitwidth),
+      encoding.getOpIdx());
   int kWidth = encoding.getKWidth();
 
   auto warpsPerCTA = mmaLayout.getWarpsPerCTA();
@@ -621,16 +602,16 @@ Value loadArg(ConversionPatternRewriter &rewriter, Location loc,
   std::function<void(int, int, int)> loadFn;
   if (isA)
     loadFn = getLoadMatrixFn(
-        descTy, smemObj, mmaLayout, warpsPerTile /*warpsPerTile*/, 2 /*kOrder*/,
-        kWidth, {1, mmaInstrM, mmaInstrK} /*instrShape*/,
+        encoding, descTy, smemObj, mmaLayout, warpsPerTile /*warpsPerTile*/,
+        2 /*kOrder*/, kWidth, {1, mmaInstrM, mmaInstrK} /*instrShape*/,
         {1, matShapeM, matShapeK} /*matShape*/,
         {warpB, warpM, warpN} /*multiDimWarpId*/, lane /*laneId*/,
         vals /*vals*/, isA /*isA*/, typeConverter /* typeConverter */,
         rewriter /*rewriter*/, loc /*loc*/);
   else
     loadFn = getLoadMatrixFn(
-        descTy, smemObj, mmaLayout, warpsPerTile /*warpsPerTile*/, 1 /*kOrder*/,
-        kWidth, {1, mmaInstrK, mmaInstrN} /*instrShape*/,
+        encoding, descTy, smemObj, mmaLayout, warpsPerTile /*warpsPerTile*/,
+        1 /*kOrder*/, kWidth, {1, mmaInstrK, mmaInstrN} /*instrShape*/,
         {1, matShapeK, matShapeN} /*matShape*/,
         {warpB, warpM, warpN} /*multiDimWarpId*/, lane /*laneId*/,
         vals /*vals*/, isA /*isA*/, typeConverter /* typeConverter */,

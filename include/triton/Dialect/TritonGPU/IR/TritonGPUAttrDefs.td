@@ -1082,8 +1082,13 @@ For example, the matrix L corresponding to blockTileSize=[32,16] is:
     SmallVector<int> getMMAv1Rep(int opIdx) const;
     SmallVector<int> getMMAv1ShapePerWarp(int opIdx) const;
     int getMMAv1Vec(int opIdx) const;
+    /// Return the kwidth supported by `mma` instruction.
+    static int getMMAv2NaturalKWidth(int bitwidth) {
+      // When bitwidth larger than 32, vec-width is 1.
+      return std::max(32 / bitwidth, 1);
+    }
     SmallVector<int64_t> getMMAv2Rep(ArrayRef<int64_t> shape,
-                                     int bitwidth, int opIdx) const;
+                                     int kWidth, int opIdx) const;
 
     bool supportReduction() const {
       if (isAmpere() || isHopper()) {
@@ -1157,11 +1162,15 @@ section 9.7.13.4.1 for more details.
     ins
     "unsigned":$opIdx,
     "Attribute":$parent,
+    // For MMAv2, kWidth is sizePerThread along the k-dim. It could be 'natural kwidth', a.k.a.
+    // `32 / bitwidth`, which is supported by `mma` instr, or un-natural ones, which is needed,
+    // for example to fp-cast fp16 dot-operand to fp32 dot-operand. In this scenario, to maintain
+    // the same division of tensor-tile among threads, both src and dest of fp-cast can not be 'natual'
+    // at the same time. Maintaining the same division is simplification for elementwise op lowering.
     "unsigned":$kWidth
   );
 
   let builders = [
-        // Specially for MMAV1(Volta)
     AttrBuilder<(ins "unsigned":$opIdx,
                      "Attribute":$parent,
                      "Type":$eltTy), [{
@@ -1169,7 +1178,7 @@ section 9.7.13.4.1 for more details.
       if (!parentAttr || !parentAttr.isAmpere())
         return $_get(context, opIdx, parent, 0);
       unsigned bitwidth = eltTy.getIntOrFloatBitWidth();
-      unsigned MMAv2kWidth = 32 / bitwidth;
+      unsigned MMAv2kWidth = NvidiaMmaEncodingAttr::getMMAv2NaturalKWidth(bitwidth);
       return $_get(context, opIdx, parent, MMAv2kWidth);
     }]>
   ];

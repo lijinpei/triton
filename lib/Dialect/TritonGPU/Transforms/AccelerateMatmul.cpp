@@ -137,38 +137,39 @@ class BlockedToMMA : public mlir::RewritePattern {
                 mlir::TypeID::get<arith::ArithDialect>());
   }
 
-  // Finds the first different bitwidth in the chain of shape-preserving
-  // unary ops that x depends on.
-  // There are two primary scenarios:
-  // (1) Upcasting: A sequence such as loading an fp16, followed by arithmetic
-  // operations, then bitcasting to fp32, and finally computing in fp32.
-  // (2) Downcasting: This might involve loading an fp32, performing arithmetic
-  // operations, bitcasting to fp16, and finally computing in fp16.
-  // In the upcasting scenario, element reordering converts the original
-  // elements distribution to the order of higher precision primitives. As a
-  // result, kwidth can be the bitwidth of the lower precision primitive.
-  // Conversely, in the downcasting scenario, no reordering is performed,
-  // making it directory use the lower precision primitive.
-  static int computeOrigBitWidth(Value x) {
-    int finalBitWidth = getElementTypeOrSelf(x).getIntOrFloatBitWidth();
-    int origBitWidth = finalBitWidth;
-    SetVector<Operation *> slice;
-    mlir::BackwardSliceOptions opt;
-    opt.omitBlockArguments = true;
-    opt.filter = bwdFilter;
-    getBackwardSlice(x, &slice, opt);
-    for (auto op : slice) {
-      if (Value arg = op->getOperand(0))
-        if (auto argTy = arg.getType().dyn_cast<RankedTensorType>()) {
-          auto argBitWidth = argTy.getElementType().getIntOrFloatBitWidth();
-          if (argBitWidth != origBitWidth) {
-            origBitWidth = std::min<int>(origBitWidth, argBitWidth);
-            break;
-          }
-        }
-    }
-    return origBitWidth;
-  }
+  //// Finds the first different bitwidth in the chain of shape-preserving
+  //// unary ops that x depends on.
+  //// There are two primary scenarios:
+  //// (1) Upcasting: A sequence such as loading an fp16, followed by arithmetic
+  //// operations, then bitcasting to fp32, and finally computing in fp32.
+  //// (2) Downcasting: This might involve loading an fp32, performing
+  /// arithmetic / operations, bitcasting to fp16, and finally computing in
+  /// fp16. / In the upcasting scenario, element reordering converts the
+  /// original / elements distribution to the order of higher precision
+  /// primitives. As a / result, kwidth can be the bitwidth of the lower
+  /// precision primitive. / Conversely, in the downcasting scenario, no
+  /// reordering is performed, / making it directory use the lower precision
+  /// primitive.
+  // static int computeOrigBitWidth(Value x) {
+  //   int finalBitWidth = getElementTypeOrSelf(x).getIntOrFloatBitWidth();
+  //   int origBitWidth = finalBitWidth;
+  //   SetVector<Operation *> slice;
+  //   mlir::BackwardSliceOptions opt;
+  //   opt.omitBlockArguments = true;
+  //   opt.filter = bwdFilter;
+  //   getBackwardSlice(x, &slice, opt);
+  //   for (auto op : slice) {
+  //     if (Value arg = op->getOperand(0))
+  //       if (auto argTy = arg.getType().dyn_cast<RankedTensorType>()) {
+  //         auto argBitWidth = argTy.getElementType().getIntOrFloatBitWidth();
+  //         if (argBitWidth != origBitWidth) {
+  //           origBitWidth = std::min<int>(origBitWidth, argBitWidth);
+  //           break;
+  //         }
+  //       }
+  //   }
+  //   return origBitWidth;
+  // }
 
 public:
   BlockedToMMA(mlir::MLIRContext *context, int computeCapability)
@@ -307,8 +308,8 @@ public:
     } else {
 
       // convert operands
-      int minBitwidth =
-          std::min(computeOrigBitWidth(a), computeOrigBitWidth(b));
+      int minBitwidth = getElementTypeOrSelf(a).getIntOrFloatBitWidth();
+      assert(minBitwidth == getElementTypeOrSelf(b).getIntOrFloatBitWidth());
       Type minType = IntegerType::get(ctx, minBitwidth);
       // convert A operand
       auto newAEncoding = ttg::DotOperandEncodingAttr::get(

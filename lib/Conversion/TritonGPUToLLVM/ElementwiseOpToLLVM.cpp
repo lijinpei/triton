@@ -66,6 +66,9 @@ SmallVector<Value> reorderValues(const SmallVector<Value> &values, Type inType,
   auto ouEltTy = ouTensorTy.getElementType();
   if (inBitWidth == ouBitWidth)
     return values;
+  if (inEncoding.getOpIdx() == 1) {
+    return values;
+  }
   if (inBitWidth == 16 && ouBitWidth == 32) {
     SmallVector<Value> ret;
     for (unsigned i = 0; i < values.size(); i += 8) {
@@ -105,9 +108,10 @@ SmallVector<Value> reorderValues(const SmallVector<Value> &values, Type inType,
   llvm_unreachable("unimplemented code path");
 }
 
-SmallVector<Value> unpackI32(const SmallVector<Value> &inValues, Type srcTy,
-                             ConversionPatternRewriter &rewriter, Location loc,
-                             const LLVMTypeConverter *typeConverter) {
+SmallVector<Value>
+unpackMMAv2DotOperand(const SmallVector<Value> &inValues, Type srcTy,
+                      ConversionPatternRewriter &rewriter, Location loc,
+                      const LLVMTypeConverter *typeConverter) {
   auto tensorTy = srcTy.dyn_cast<RankedTensorType>();
   if (!tensorTy)
     return inValues;
@@ -115,21 +119,23 @@ SmallVector<Value> unpackI32(const SmallVector<Value> &inValues, Type srcTy,
   if (!(encoding && encoding.getParent().isa<NvidiaMmaEncodingAttr>()))
     return inValues;
   SmallVector<Value> outValues;
-  for (auto v : inValues) {
-    // cast i32 to appropriate eltType vector and extract elements
-    auto eltType = typeConverter->convertType(tensorTy.getElementType());
-    auto vecType = vec_ty(eltType, 32 / eltType.getIntOrFloatBitWidth());
-    auto vec = bitcast(v, vecType);
-    for (int i = 0; i < 32 / eltType.getIntOrFloatBitWidth(); i++) {
+  auto *ctx = rewriter.getContext();
+  auto kWidth = encoding.getKWidth();
+  auto eltType = typeConverter->convertType(tensorTy.getElementType());
+  auto vecType = vec_ty(eltType, kWidth);
+  for (auto vec : inValues) {
+    for (int i = 0; i < kWidth; ++i) {
       outValues.push_back(extract_element(vec, i32_val(i)));
     }
   }
   return outValues;
 }
 
-SmallVector<Value> packI32(const SmallVector<Value> &inValues, Type srcTy,
-                           ConversionPatternRewriter &rewriter, Location loc,
-                           const LLVMTypeConverter *typeConverter) {
+SmallVector<Value> packMMAv2DotOperand(const SmallVector<Value> &inValues,
+                                       Type srcTy,
+                                       ConversionPatternRewriter &rewriter,
+                                       Location loc,
+                                       const LLVMTypeConverter *typeConverter) {
   auto tensorTy = srcTy.dyn_cast<RankedTensorType>();
   if (!tensorTy)
     return inValues;
@@ -137,15 +143,16 @@ SmallVector<Value> packI32(const SmallVector<Value> &inValues, Type srcTy,
   if (!(encoding && encoding.getParent().isa<NvidiaMmaEncodingAttr>()))
     return inValues;
   SmallVector<Value> outValues;
+  auto *ctx = rewriter.getContext();
   auto eltType = typeConverter->convertType(tensorTy.getElementType());
-  int vecWidth = 32 / eltType.getIntOrFloatBitWidth();
-  auto vecType = vec_ty(eltType, vecWidth);
-  for (int i = 0; i < inValues.size(); i += vecWidth) {
+  int kWidth = encoding.getKWidth();
+  auto vecType = vec_ty(eltType, kWidth);
+  for (int i = 0; i < inValues.size(); i += kWidth) {
     Value vec = undef(vecType);
-    for (int j = 0; j < vecWidth; j++) {
+    for (int j = 0; j < kWidth; j++) {
       vec = insert_element(vec, inValues[i + j], i32_val(j));
     }
-    outValues.push_back(bitcast(vec, i32_ty));
+    outValues.push_back(vec);
   }
   return outValues;
 }
@@ -445,8 +452,8 @@ struct ElementwiseInlineAsmOpConversion
     for (auto operand : adaptor.getOperands()) {
       auto argTy = op->getOperand(0).getType();
       auto subOperands = unpackLLElements(loc, operand, rewriter);
-      unpackedOperands.push_back(
-          unpackI32(subOperands, argTy, rewriter, loc, getTypeConverter()));
+      unpackedOperands.push_back(unpackMMAv2DotOperand(
+          subOperands, argTy, rewriter, loc, getTypeConverter()));
     }
 
     // Although we ensure that all operands and results to this op have the same
@@ -523,8 +530,9 @@ struct ElementwiseInlineAsmOpConversion
             unpackedResults[i], /*inType=*/op->getOperand(0).getType(),
             /*ouType=*/op->getResult(i).getType());
       }
-      auto packed = packI32(unpackedResults[i], op->getResult(i).getType(),
-                            rewriter, loc, getTypeConverter());
+      auto packed =
+          packMMAv2DotOperand(unpackedResults[i], op->getResult(i).getType(),
+                              rewriter, loc, getTypeConverter());
       outs.push_back(packLLElements(loc, getTypeConverter(), unpackedResults[i],
                                     rewriter, op->getResult(i).getType()));
     }

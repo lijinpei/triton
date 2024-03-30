@@ -286,12 +286,13 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
   auto dShapePerCTA = triton::gpu::getShapePerCTA(dTensorTy);
 
   int bitwidth = aTensorTy.getElementType().getIntOrFloatBitWidth();
+  int kWidth = NvidiaMmaEncodingAttr::getMMAv2NaturalKWidth(bitwidth);
   auto dotOpA = aTensorTy.getEncoding().cast<DotOperandEncodingAttr>();
   auto repA = dotOpA.getParent().cast<NvidiaMmaEncodingAttr>().getMMAv2Rep(
-      aShapePerCTA, bitwidth, dotOpA.getOpIdx());
+      aShapePerCTA, kWidth, dotOpA.getOpIdx());
   auto dotOpB = bTensorTy.getEncoding().cast<DotOperandEncodingAttr>();
   auto repB = dotOpB.getParent().cast<NvidiaMmaEncodingAttr>().getMMAv2Rep(
-      bShapePerCTA, bitwidth, dotOpB.getOpIdx());
+      bShapePerCTA, kWidth, dotOpB.getOpIdx());
 
   assert(repA[2] == repB[1]);
   assert(repA[0] == repB[0]);

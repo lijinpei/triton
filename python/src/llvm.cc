@@ -1,4 +1,4 @@
-﻿#include "mlir/IR/BuiltinOps.h" // mlir::ModuleOp
+#include "mlir/IR/BuiltinOps.h" // mlir::ModuleOp
 #include "mlir/Target/LLVMIR/LLVMTranslationInterface.h"
 #include "mlir/Target/LLVMIR/ModuleTranslation.h"
 #include "triton/Tools/Sys/GetEnv.hpp"
@@ -16,6 +16,7 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/StandardInstrumentations.h"
 #include "llvm/Support/CodeGen.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/IPO/AlwaysInliner.h"
@@ -284,5 +285,20 @@ void init_triton_llvm(py::module &&m) {
         throw std::invalid_argument(message);
       }
     }
+  });
+
+  m.def("enable_debug", [](bool on) { llvm::DebugFlag = on; });
+  m.def("debug_only", [](const std::string &str) {
+    llvm::DebugFlag = true;
+    llvm::setCurrentDebugType(str.data());
+  });
+  m.def("debug_only", [](const std::vector<std::string> strs) {
+    llvm::DebugFlag = true;
+    std::vector<const char *> ptrs;
+    ptrs.reserve(strs.size());
+    for (const auto &str : strs) {
+      ptrs.push_back(str.data());
+    }
+    llvm::setCurrentDebugTypes(ptrs.data(), ptrs.size());
   });
 }

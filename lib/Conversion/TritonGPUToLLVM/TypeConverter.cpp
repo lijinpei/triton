@@ -69,28 +69,12 @@ Type TritonGPUToLLVMTypeConverter::convertTritonPointerType(
   return LLVM::LLVMPointerType::get(ctx, type.getAddressSpace());
 }
 
-Type TritonGPUToLLVMTypeConverter::getElementTypeForStruct(
-    TensorOrMemDesc type) {
-  auto ctx = type.getContext();
-  Attribute layout = type.getEncoding();
-  Type elemTy = convertType(type.getElementType());
-  auto dotOpLayout = layout.dyn_cast<DotOperandEncodingAttr>();
-  if (!dotOpLayout)
-    return elemTy;
-  auto mmaParent = dotOpLayout.getParent().dyn_cast<NvidiaMmaEncodingAttr>();
-  if (!mmaParent || mmaParent.isHopper())
-    return elemTy;
-  int bitwidth = elemTy.getIntOrFloatBitWidth();
-  assert(bitwidth <= 32);
-  return IntegerType::get(ctx, 32);
-}
-
 Type TritonGPUToLLVMTypeConverter::convertTritonTensorType(
     RankedTensorType type) {
   auto ctx = type.getContext();
   Attribute layout = type.getEncoding();
   SmallVector<int64_t> shape(type.getShape().begin(), type.getShape().end());
-  Type eltType = getElementTypeForStruct(cast<TensorOrMemDesc>(type));
+  Type eltType = convertType(cast<TensorOrMemDesc>(type).getElementType());
 
   if (auto shared_layout = layout.dyn_cast<SharedEncodingAttr>()) {
     SmallVector<Type, 4> types;
@@ -107,8 +91,13 @@ Type TritonGPUToLLVMTypeConverter::convertTritonTensorType(
   }
 
   unsigned numElementsPerThread = getTotalElemsPerThread(type);
+  if (auto dotOpEnc = dyn_cast<DotOperandEncodingAttr>(layout)) {
+    auto kWidth = dotOpEnc.getKWidth();
+    eltType = VectorType::get(kWidth, eltType);
+  }
   SmallVector<Type, 4> types(numElementsPerThread, eltType);
-  return LLVM::LLVMStructType::getLiteral(ctx, types);
+  auto ret = LLVM::LLVMStructType::getLiteral(ctx, types);
+  return ret;
 }
 
 Type TritonGPUToLLVMTypeConverter::convertMemDescType(MemDescType type) {

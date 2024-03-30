@@ -1799,11 +1799,11 @@ int NvidiaMmaEncodingAttr::getMMAv1Vec(int opIdx) const {
   return 2 * getMMAv1Rep(opIdx)[opIdx];
 }
 SmallVector<int64_t> NvidiaMmaEncodingAttr::getMMAv2Rep(ArrayRef<int64_t> shape,
-                                                        int bitwidth,
+                                                        int kwidth,
                                                         int opIdx) const {
   auto rank = shape.size();
   auto warpsPerCTA = getWarpsPerCTA();
-  SmallVector<int> shapePerWarp = {1, 16, 8, 4 * 64 / bitwidth};
+  SmallVector<int> shapePerWarp = {1, 16, 8, 4 * kwidth};
   int numRepBatch =
       rank == 3
           ? std::max<int64_t>(1, shape[0] / (shapePerWarp[0] * warpsPerCTA[0]))
@@ -1825,7 +1825,6 @@ SmallVector<int64_t> NvidiaMmaEncodingAttr::getMMAv2Rep(ArrayRef<int64_t> shape,
 }
 unsigned NvidiaMmaEncodingAttr::getTotalElemsPerThreadForOperands(
     ArrayRef<int64_t> shape, Type eltTy, int kWidth, int opIdx) const {
-  auto shapePerCTA = getShapePerCTA(*this, shape);
   int warpsPerCTAM = getWarpsPerCTA()[0];
   int warpsPerCTAN = getWarpsPerCTA()[1];
   // H100
@@ -1834,7 +1833,19 @@ unsigned NvidiaMmaEncodingAttr::getTotalElemsPerThreadForOperands(
   }
   // A100
   if (isAmpere()) {
-    auto rep = getMMAv2Rep(shapePerCTA, eltTy.getIntOrFloatBitWidth(), opIdx);
+    auto rank = shape.size();
+    SmallVector<int64_t> shapePerCTA{shape.begin(), shape.end()};
+    auto split = getCTASplitNum();
+    auto splitRank = split.size();
+    if (rank == 3 && splitRank == 3) {
+      shapePerCTA[0] /= split[0];
+    }
+    if (opIdx == 0) {
+      shapePerCTA[rank - 2] /= split[splitRank - 2];
+    } else {
+      shapePerCTA[rank - 1] /= split[splitRank - 1];
+    }
+    auto rep = getMMAv2Rep(shapePerCTA, kWidth, opIdx);
     if (opIdx == 0)
       return 4 * rep[0] * rep[1] * rep[2];
     if (opIdx == 1)
