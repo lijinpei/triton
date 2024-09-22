@@ -498,8 +498,9 @@ bool isSingleValue(Value value) {
 bool isExpensiveLoadOrStore(Operation *op) {
   // Case 1: Pointer of tensor is always expensive
   auto operandType = op->getOperand(0).getType();
-  if (triton::isTensorPointerType(operandType))
+  if (triton::isTensorPointerType(operandType)) {
     return true;
+  }
   // Case 2a: A size 1 tensor is not expensive since all threads will load the
   // same
   if (isSingleValue(op->getOperand(0)))
@@ -512,18 +513,18 @@ bool isExpensiveLoadOrStore(Operation *op) {
   int threadsPerWarp = triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
   if (ptrType.getNumElements() < numWarps * threadsPerWarp)
     return false;
-  return true;
+  return !isa<triton::AtomicRMWOp, triton::AtomicCASOp>(op);
 }
 
 bool isExpensiveToRemat(Operation *op, Attribute &targetEncoding) {
   if (!op)
     return true;
-  if (isa<triton::LoadOp, triton::StoreOp>(op))
+  if (isa<triton::LoadOp, triton::StoreOp, triton::AtomicRMWOp,
+          triton::AtomicCASOp>(op))
     return isExpensiveLoadOrStore(op);
   if (isa<triton::CatOp>(op))
     return triton::gpu::isExpensiveCat(cast<triton::CatOp>(op), targetEncoding);
-  if (isa<triton::gpu::AsyncCopyGlobalToLocalOp, triton::AtomicRMWOp,
-          triton::AtomicCASOp, triton::DotOp>(op))
+  if (isa<triton::gpu::AsyncCopyGlobalToLocalOp, triton::DotOp>(op))
     return true;
   if (isa<scf::YieldOp, scf::ForOp, scf::IfOp, scf::WhileOp, scf::ConditionOp>(
           op))

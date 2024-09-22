@@ -184,9 +184,9 @@ bool hasConvertToMMATransisitiveUse(Operation *op, Attribute encoding) {
 // Return true if the op is an op with a layout we don't want to change. We will
 // propagate the layout starting from anchor ops.
 bool isLayoutAnchor(Operation *op) {
-  if (isa<LoadOp, StoreOp>(op))
+  if (isa<LoadOp, StoreOp, AtomicRMWOp, AtomicCASOp>(op))
     return isExpensiveLoadOrStore(op);
-  if (isa<DotOp, nvidia_gpu::DotAsyncOp, AtomicRMWOp, AtomicCASOp>(op))
+  if (isa<DotOp, nvidia_gpu::DotAsyncOp>(op))
     return true;
 
   // Heuristic: Mark permuting reshape as a layout anchor.  Its dst can be
@@ -734,9 +734,9 @@ Operation *LayoutPropagation::rewriteOp(Operation *op) {
 }
 
 bool canBeRemat(Operation *op) {
-  if (isa<LoadOp, StoreOp>(op))
+  if (isa<LoadOp, StoreOp, AtomicRMWOp, AtomicCASOp>(op))
     return !isExpensiveLoadOrStore(op);
-  if (isa<AtomicRMWOp, AtomicCASOp, DotOp>(op))
+  if (isa<DotOp>(op))
     return false;
   if (isa<scf::WhileOp, scf::ConditionOp>(op))
     return false;
