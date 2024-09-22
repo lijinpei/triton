@@ -406,11 +406,10 @@ void LayoutPropagation::resolveConflicts() {
     // Hacky resolve, prefer block encoding.
     // TODO: add a proper heuristic.
     Attribute encoding = *info.encodings.begin();
-    bool isLoadOrStore =
-        op && isa<LoadOp, StoreOp, AtomicRMWOp, AtomicCASOp>(op);
+    bool isLoad = op && isa<LoadOp>(op);
     for (Attribute e : info.encodings) {
-      if ((isLoadOrStore && isa<BlockedEncodingAttr>(e)) ||
-          (!isLoadOrStore && isa<MmaEncodingTrait>(e))) {
+      if ((isLoad && isa<BlockedEncodingAttr>(e)) ||
+          (!isLoad && isa<MmaEncodingTrait>(e))) {
         encoding = e;
         break;
       }
