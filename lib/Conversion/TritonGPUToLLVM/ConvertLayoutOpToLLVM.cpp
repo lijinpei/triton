@@ -571,6 +571,21 @@ struct ConvertLayoutOpUsingLinearLayoutsConversion
                                         {kWarp, warpId},
                                         {kBlock, i32_val(0)}})[0]
                          .second;
+    Value storeMask = true_val();
+    auto freeVars = shmemStoreLayout->getFreeVariableMasks();
+    for (const auto [str, mask] : freeVars) {
+      Value val;
+      if (str == kLane) {
+        val = laneId;
+      } else if (str == kWarp) {
+        val = warpId;
+      } else {
+        continue;
+      }
+      val = and_(val, i32_val(mask));
+      auto valPred = icmp_eq(val, i32_val(0));
+      storeMask = and_(storeMask, valPred);
+    }
     auto loadBase = applyLinearLayout(loc, rewriter, shmemLoadLayout,
                                       {{kRegister, i32_val(0)},
                                        {kLane, laneId},
@@ -601,7 +616,7 @@ struct ConvertLayoutOpUsingLinearLayoutsConversion
           targetInfo.storeMatrixShared(rewriter, loc, vecAddr, valsVec);
         } else {
           targetInfo.storeDShared(rewriter, loc, vecAddr, std::nullopt, valsVec,
-                                  /*pred=*/true_val());
+                                  storeMask);
         }
       }
 
