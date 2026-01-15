@@ -317,3 +317,68 @@ composePaddedLayout(const tt::AMD::TargetInfo &targetInfo,
   }
   return {};
 }
+
+// Given a distributed encoding attr, returns a linear shared encoding that when composed with the dist-enc, maps lanes in a warp continuously, width each lane vector bitwidth being bankBitSize.
+// Since dist-enc has no bits swizzled together, it can be saparated into a product of lane-part, register-part, and warp-part. To get the final contiguous linear-layout, we product a continuous vec-reg, lane mapping with the rest orginal mapping. To get the shared-encoding, we compose the final layout with the right inverse of dist-enc.
+ttg::SharedLinearEncodingAttr
+getWarpContinuousSharedEncoding(ttg::DistributedEncodingTrait distEnc, ArrayRef<int64_t> shape, uint32_t elemBitSize, uint32_t bankBitSize, ArrayRef<unsigned> sharedOrder) {
+  // When elemBitSize smaller than bankBitSize, per-instr bank conflict is un-avoidable, using vecCnt 1 won't waste bandwidth but cdna buffer lds has fixed stride of 4 bytes.
+  if (elemBitSize > bankBitSize) {
+    return {};
+  }
+  uint64_t vecCnt = bankBitSize / elemBitSize;
+  auto* ctx = distEnc.getContext();
+  auto distLL = toLinearEncoding(distEnc, shape).getLinearLayout();
+  auto distBases = distLL.getBases();
+  auto numOutDims = sharedOrder.size();
+  SmallVector<unsigned> outDimBitSize;
+  outDimBitSize.reserve(numOutDims);
+  LinearLayout::BasesT sharedBases;
+  sharedBases.reserve(numOutDims);
+  for (auto s: distLL.getOutDimSizes()) {
+    auto sBits = llvm::Log2_32(s);
+    outDimBitSize.push_back(sBits);
+    sharedBases.push_back(std::vector<int32_t>(sBits));
+  }
+  SmallVector<unsigned> outDimBitSizeCumSum;
+  outDimBitSizeCumSum.reserve(numOutDims);
+  unsigned totalOutDimBitSize = 0;
+  for (auto dim: sharedOrder) {
+    outDimBitSizeCumSum.push_back(totalOutDimBitSize);
+    totalOutDimBitSize += outDimBitSize[dim];
+  }
+  BitVector visitedDims(totalOutDimBitSize);
+  unsigned currOffset = 1;
+  auto appendOutBase = [&](const ArrayRef<int32_t>& outBases) {
+    for (unsigned dim = 0; dim < numOutDims; ++dim) {
+      auto outBase = outBases[dim];
+      if (outBase) {
+        auto outBit = llvm::Log2_32(outBase);
+        visitedDims.set(outDimBitSizeCumSum[i] + outBit);
+        sharedBases[dim][outBit] = currOffset;
+        currOffset <<= 1;
+        return;
+      }
+    }
+  };
+  auto regBases = distBases[StringAttr::get(ctx, "register")];
+  for (unsigned i = 0, e = llvm::Log2_32(vecCnt); i < e; ++i) {
+    appendOutBase(regBases[i]);
+  }
+  auto warpBases = distBases[StringAttr::get(ctx, "warp")];
+  for (const auto& warpBase: warpBases) {
+    appendOutBase(warpBase);
+  }
+  for (auto dim: sharedOrder) {
+    auto dimStartPos = outDimBitSizeCumSum[dim];
+    for (unsigned bit = 0, end = outDimBitSize[dim]; bit < end; ++bit) {
+      if (!visitedDims.test(dimStartPos + bit)) {
+        sharedBases[dim][bit] = currOffset;
+        currOffset <<= 1;
+      }
+    }
+  }
+  auto sharedLL = LinearLayout(std::move(sharedBases), {{StringAttr::get(ctx, "offset"), totalOutDimBitSize}}, true);
+  // FIXME: layout alignment
+  return SharedLinearEncodingAttr::get(ctx, std::move(sharedLL), 0);
+}
